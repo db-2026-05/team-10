@@ -18,11 +18,11 @@
 //    → Enforces data integrity at the DB level; only allowed
 //      values can be inserted. Prevents typos like "Montly".
 //
-// 2. Members ↔ Memberships (bidirectional reference)
-//    → A Member has one active Membership (members.membership_id).
-//      A Membership also records which Member it belongs to
-//      (memberships.member_id). This allows both lookups:
-//      "what is this member's plan?" and "who owns this plan?"
+// 2. Members → Memberships (single-direction relationship)
+//    → A Membership records which Member it belongs to
+//      (memberships.member_id). To find a member's active membership,
+//      query: SELECT * FROM Memberships WHERE member_id = X AND is_active = TRUE.
+//      This avoids circular insert dependencies and keeps the design simple.
 //
 // 3. Attendance UNIQUE index on (member_id, class_id, date)
 //    → Prevents double-booking: a member cannot appear twice
@@ -120,6 +120,8 @@ Table Memberships {
   start_date      date                 [not null,       note: "Inclusive start date of the membership period"]
   end_date        date                 [not null,       note: "Inclusive expiry date. CONSTRAINT: end_date > start_date"]
   is_active       boolean              [not null,       note: "TRUE if this is the member's currently active membership. DEFAULT TRUE. Only one active membership per member"]
+  created_at      timestamp            [not null,       note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at      timestamp            [not null,       note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
 
   indexes {
     member_id                [name: "idx_memberships_member_id"]
@@ -156,9 +158,11 @@ Table Members {
   first_name    varchar(50)  [not null,       note: "CONSTRAINT: non-empty string, max 50 chars"]
   last_name     varchar(50)  [not null,       note: "CONSTRAINT: non-empty string, max 50 chars"]
   email         varchar(100) [not null, unique, note: "Business identifier — must be unique and valid email format. Used for login and notifications"]
-  phone         varchar(20)  [                note: "Optional contact number. Stored as string to support international formats (+38050...)"]
+  phone         varchar(20)  [                note: "Optional contact number. Stored as string to support international formats (+38050...). CONSTRAINT: CHECK (phone IS NULL OR phone ~ '^[+]?[0-9]{10,20}$')"]
   date_of_birth date         [                note: "Optional. Used to calculate age for age-restricted classes"]
   join_date     date         [not null,       note: "Set to CURRENT_DATE on insert. Marks when the member account was created"]
+  created_at    timestamp    [not null,       note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at    timestamp    [not null,       note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
 
   indexes {
     email [unique, name: "uq_members_email"]
@@ -190,10 +194,12 @@ Table Trainers {
   first_name  varchar(50)  [not null,         note: "CONSTRAINT: non-empty, max 50 chars"]
   last_name   varchar(50)  [not null,         note: "CONSTRAINT: non-empty, max 50 chars"]
   email       varchar(100) [not null, unique, note: "Unique business identifier — used for login and scheduling"]
-  phone       varchar(20)  [                  note: "Optional contact phone"]
+  phone       varchar(20)  [                  note: "Optional contact phone. CONSTRAINT: CHECK (phone IS NULL OR phone ~ '^[+]?[0-9]{10,20}$')"]
   hire_date   date         [not null,         note: "Date the trainer was officially employed. Used for seniority calculations"]
   is_active   boolean      [not null,         note: "TRUE if trainer is currently employed and available for classes/PT sessions. DEFAULT TRUE. Set to FALSE instead of deleting"]
   bio         text         [                  note: "Optional. Free-text professional background displayed on trainer profile page"]
+  created_at  timestamp    [not null,         note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at  timestamp    [not null,         note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
 
   indexes {
     email     [unique, name: "uq_trainers_email"]
@@ -230,6 +236,8 @@ Table Classes {
   end_time     time             [not null,      note: "Class end time. CONSTRAINT: end_time > start_time"]
   capacity     int              [not null,      note: "Maximum participants allowed. DEFAULT 20. CONSTRAINT: capacity > 0"]
   room         varchar(50)      [               note: "Optional room or zone label (e.g. Studio A, Main Floor)"]
+  created_at   timestamp        [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at   timestamp        [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
 
   indexes {
     trainer_id                 [name: "idx_classes_trainer_id"]
@@ -263,6 +271,8 @@ Table Attendance {
   class_id        int                    [not null,      note: "FK → Classes. CASCADE delete — remove attendance if class is deleted"]
   attendance_date date                   [not null,      note: "The specific calendar date of the class session"]
   status          attendance_status_enum [not null,      note: "ENUM — present | absent | cancelled. DEFAULT present"]
+  created_at      timestamp              [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at      timestamp              [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
 
   indexes {
     (member_id, class_id, attendance_date) [unique, name: "uq_attendance_no_duplicate",   note: "CORE INTEGRITY: prevents a member being logged twice for the same class on the same day"]
@@ -304,6 +314,8 @@ Table TrainerSpecializations {
   specialization    varchar(100) [not null,      note: "Area of expertise, e.g. Nutrition, CrossFit, Pilates, Rehabilitation. CONSTRAINT: non-empty"]
   certified         boolean      [not null,      note: "TRUE if the trainer holds a formal certificate for this specialization. DEFAULT FALSE"]
   cert_date         date         [               note: "Date the certificate was issued. NULL if not certified or date unknown"]
+  created_at        timestamp    [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at        timestamp    [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
 
   indexes {
     trainer_id                   [name: "idx_spec_trainer_id"]
@@ -336,6 +348,8 @@ Table TrainerAvailability {
   day_of_week     day_of_week_enum [not null,      note: "ENUM — the weekday this availability window applies to"]
   available_from  time             [not null,      note: "Start of the window. CONSTRAINT: available_from < available_until"]
   available_until time             [not null,      note: "End of the window. CONSTRAINT: available_until > available_from"]
+  created_at      timestamp        [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at      timestamp        [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
 
   indexes {
     trainer_id                                [name: "idx_avail_trainer_id"]
@@ -355,6 +369,16 @@ Table TrainerAvailability {
   checks this table to confirm the trainer is available at the
   requested time. A future enhancement could add date-specific
   overrides (e.g., vacation days) via a TrainerBlacklist table.
+
+  Overlapping time windows prevention:
+    - The UNIQUE index on (trainer_id, day_of_week, available_from)
+      prevents exact duplicates but does NOT prevent overlaps like
+      09:00-11:00 and 10:30-12:00.
+    - Overlapping windows are validated at the APPLICATION LEVEL
+      before insert/update by checking existing windows for the same
+      trainer and day, ensuring no overlap occurs.
+    - Alternative: Use PostgreSQL exclusion constraints with ranges
+      (e.g., EXCLUDE USING gist (trainer_id WITH =, tsrange(...) WITH &&))
   '''
 }
 
@@ -374,12 +398,14 @@ Table PersonalTraining {
   status       session_status_enum [not null,      note: "ENUM — scheduled | completed | cancelled. DEFAULT scheduled"]
   notes        text                [               note: "Optional post-session notes by trainer (exercises done, feedback)"]
   price        decimal(10,2)       [               note: "Price for this session. CONSTRAINT: price >= 0 if set"]
+  created_at   timestamp           [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at   timestamp           [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
 
   indexes {
     member_id                              [name: "idx_pt_member_id"]
     trainer_id                             [name: "idx_pt_trainer_id"]
-    (trainer_id, session_date, start_time) [unique, name: "uq_pt_trainer_no_overlap", note: "A trainer cannot have two sessions at the same date and start time"]
-    (member_id, session_date, start_time)  [unique, name: "uq_pt_member_no_overlap",  note: "A member cannot book two sessions at the same date and start time"]
+    (trainer_id, session_date, start_time) [unique, name: "uq_pt_trainer_no_overlap", note: "A trainer cannot have two sessions at the same date and start time. This is INTENTIONALLY a separate constraint from the member constraint below."]
+    (member_id, session_date, start_time)  [unique, name: "uq_pt_member_no_overlap",  note: "A member cannot book two sessions at the same date and start time. This is INTENTIONALLY a separate constraint from the trainer constraint above. Together they prevent both trainer and member double-booking."]
   }
 
   note: '''
@@ -421,6 +447,8 @@ Table Equipment {
   last_maintained date                  [               note: "Date of most recent maintenance. Used to trigger overdue alerts"]
   quantity        int                   [not null,      note: "Number of identical units. CONSTRAINT: quantity >= 0"]
   location        varchar(100)          [               note: "Physical location in the gym, e.g. Room A, Main Floor Zone 3"]
+  created_at      timestamp             [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at      timestamp             [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
 
   indexes {
     status   [name: "idx_equipment_status",   note: "Quickly filter all equipment needing maintenance"]
@@ -453,10 +481,12 @@ Table Progress {
   progress_id    int          [pk, increment, note: "Surrogate primary key"]
   member_id      int          [not null,      note: "FK → Members. CASCADE delete"]
   recorded_date  date         [not null,      note: "The date these metrics were measured. Enables trend analysis over time"]
-  weight_kg      decimal(5,2) [               note: "Body weight in kilograms. CONSTRAINT: weight_kg > 0 if provided"]
-  body_fat_pct   decimal(5,2) [               note: "Body fat percentage. CONSTRAINT: 0 <= body_fat_pct <= 100 if provided"]
-  muscle_mass_kg decimal(5,2) [               note: "Estimated muscle mass in kg. CONSTRAINT: > 0 if provided"]
+  weight_kg      decimal(5,2) [               note: "Body weight in kilograms. CONSTRAINT: CHECK (weight_kg IS NULL OR weight_kg > 0)"]
+  body_fat_pct   decimal(5,2) [               note: "Body fat percentage. CONSTRAINT: CHECK (body_fat_pct IS NULL OR (body_fat_pct >= 0 AND body_fat_pct <= 100))"]
+  muscle_mass_kg decimal(5,2) [               note: "Estimated muscle mass in kg. CONSTRAINT: CHECK (muscle_mass_kg IS NULL OR muscle_mass_kg > 0)"]
   notes          text         [               note: "Optional trainer or member observations for this check-in"]
+  created_at     timestamp    [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at     timestamp    [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
 
   indexes {
     member_id                  [name: "idx_progress_member_id"]
@@ -494,7 +524,9 @@ Table Goals {
   goal_description text    [not null,      note: "Free-text description of the target. CONSTRAINT: non-empty"]
   target_date      date    [               note: "Optional deadline. NULL = open-ended goal"]
   achieved         boolean [not null,      note: "TRUE when the member has met the goal. DEFAULT FALSE"]
-  achieved_date    date    [               note: "Date the goal was marked as achieved. Only set when achieved = TRUE"]
+  achieved_date    date    [               note: "Date the goal was marked as achieved. Only set when achieved = TRUE. CONSTRAINT: CHECK ((achieved = TRUE AND achieved_date IS NOT NULL) OR (achieved = FALSE AND achieved_date IS NULL))"]
+  created_at       timestamp [not null,    note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at       timestamp [not null,    note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
 
   indexes {
     member_id             [name: "idx_goals_member_id"]
@@ -507,7 +539,7 @@ Table Goals {
   Integrity checks:
     - achieved is NOT NULL (no ambiguity — explicitly true or false)
     - achieved_date should only be set when achieved = TRUE
-      (enforced via application logic or SQL trigger)
+      (enforced via CHECK constraint)
     - goal_description is NOT NULL
 
   Design: Goals are separate from Progress because they represent
