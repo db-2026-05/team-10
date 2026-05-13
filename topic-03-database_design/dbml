@@ -36,3 +36,104 @@
 
 
 // Вставте ваш DBML-код нижче 👇
+Table members{
+  id integer [primary key]
+  name nvarchar[50] [not null]
+  gender char [not null]
+  age integer [not null]
+}
+
+Table membership_types{
+  id integer [primary key]
+  type nvarchar[50] [not null]
+}
+
+Table memberships{
+  member_id integer [ref:>members.id]
+  type_id integer [ref:> membership_types.id]
+  start date [not null]
+  end date [not null]
+}
+
+Table trainers{
+  id integer [primary key]
+  name nvarchar[50] [not null]
+}
+
+Table class{
+  id integer [primary key]
+  type nvarchar[50] [not null]
+  price float [not null]
+  info text
+}
+
+Table attendance{
+  member_id integer [ref:> members.id]
+  attend_datetime datetime [not null]
+  class_id integer [ref:>class.id] //i decided to go with nullable
+   // because members could just train themselves without any class 
+}
+
+Table classes{
+  class_id integer [ref:> class.id, not null] 
+  trainer_id integer [ref:> trainers.id, not null]
+  // specialization_id integer [ref:> specializations.id] //i think
+  // //this would be redundant with the trainer_specialization table,
+  // //but decided to include nonetheless
+  dotw integer [not null]//day of the week
+  from time [not null]
+  to time [not null]
+}
+
+Table class_equipment_type{
+  class_id integer [ref:>class.id]
+  equipment_type_id integer [ref:> equipment_types.id]
+}
+
+
+Table equipment_types{
+  id integer [primary key]
+  type nvarchar[50] [not null]
+}
+
+Table equipment{
+  equipment_id integer [primary key]
+  equipment_type_id integer [not null,ref:> equipment_types.id]
+  bought_at date [not null]
+  needs_maintenance boolean [null]
+  last_maintained date [null]
+}
+
+Table specializations{
+  id integer [primary key]
+  type nvarchar[50] [not null]
+}
+
+Table trainer_specialization{
+  trainer_id integer [ref:> trainers.id]
+  specialization_id integer [ref:> specializations.id]
+}
+
+
+Table classes_specialization{
+  class_id integer [ref:> class.id]
+  specialization_id integer [ref:> specializations.id]
+}
+
+Table trainer_availability{
+  trainer_id integer [ref:>trainers.id]
+  dotw integer [not null]
+  from time [not null]
+  to time [not null]
+}
+
+Table personal_training{
+  id integer [primary key]
+  trainer_id integer [ref:> trainers.id]
+  member_id integer [ref:>members.id]
+  price float [not null]
+  personal_training_date date [not null]
+  from time [not null]
+  to time [not null]
+}
+
