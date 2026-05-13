@@ -1,0 +1,556 @@
+// ============================================================
+// FITNESS CENTER DATABASE — DBML Schema (Final Version)
+// Render at: https://dbdiagram.io
+// ============================================================
+//
+// 🟢 MVP Tables:
+//    Members, Memberships, Trainers, Classes, Attendance
+//
+// 🔵 Final Version Tables:
+//    Equipment, PersonalTraining, Progress,
+//    Goals, TrainerSpecializations, TrainerAvailability
+//
+// ============================================================
+// DESIGN DECISIONS & RATIONALE
+// ============================================================
+//
+// 1. ENUM TYPES instead of raw varchar for status/type fields
+//    → Enforces data integrity at the DB level; only allowed
+//      values can be inserted. Prevents typos like "Montly".
+//
+// 2. Members → Memberships (single-direction relationship)
+//    → A Membership records which Member it belongs to
+//      (memberships.member_id). To find a member's active membership,
+//      query: SELECT * FROM Memberships WHERE member_id = X AND is_active = TRUE.
+//      This avoids circular insert dependencies and keeps the design simple.
+//
+// 3. Attendance UNIQUE index on (member_id, class_id, date)
+//    → Prevents double-booking: a member cannot appear twice
+//      in the same class on the same day.
+//
+// 4. TrainerAvailability UNIQUE index on (trainer_id, day, from)
+//    → Prevents overlapping availability slots for the same
+//      trainer on the same day starting at the same time.
+//
+// 5. PersonalTraining references both Members and Trainers
+//    → Supports many-to-many booking pattern without a junction
+//      table, since the session itself carries extra data
+//      (date, time, price, status, notes).
+//
+// 6. Progress stores periodic snapshots (not overwrite)
+//    → Each row is a dated record, allowing trend analysis
+//      over time (e.g., weight loss curve, muscle gain).
+//
+// 7. Goals are separate from Progress
+//    → Goals represent intent (target), Progress represents
+//      actual measured data. Keeping them separate allows
+//      comparing goal vs. reality without coupling the tables.
+//
+// 8. Equipment is standalone (no FK to Members/Trainers)
+//    → Equipment is shared gym inventory. Linking it to a
+//      specific person would overcomplicate MVP scope.
+//      In an advanced version, an EquipmentUsage junction
+//      table could be added.
+//
+// 9. Soft references use NULL-able FKs (e.g. trainer_id in Classes)
+//    → If a trainer leaves, the class record is preserved with
+//      trainer_id = NULL instead of being deleted. This protects
+//      historical attendance data.
+//
+// 10. Indexes added on all FK columns
+//     → Foreign key columns are frequently used in JOINs and
+//       WHERE clauses. Indexing them significantly speeds up
+//       queries like "all classes for a trainer" or
+//       "all sessions for a member".
+//
+// ============================================================
+
+
+// ============================================================
+// ENUM TYPE DEFINITIONS
+// ============================================================
+// Design choice: Enums enforce strict allowed values at the
+// schema level, eliminating the need for application-side
+// validation for these fields.
+
+Enum membership_type_enum {
+  monthly   [note: "Billed and valid for one calendar month"]
+  yearly    [note: "Billed annually, usually discounted"]
+  premium   [note: "All-inclusive plan with PT sessions included"]
+}
+
+Enum attendance_status_enum {
+  present   [note: "Member attended the class"]
+  absent    [note: "Member did not show up"]
+  cancelled [note: "Member cancelled in advance"]
+}
+
+Enum day_of_week_enum {
+  Mon
+  Tue
+  Wed
+  Thu
+  Fri
+  Sat
+  Sun
+}
+
+Enum session_status_enum {
+  scheduled  [note: "Session is booked and upcoming"]
+  completed  [note: "Session took place successfully"]
+  cancelled  [note: "Session was cancelled by member or trainer"]
+}
+
+Enum equipment_status_enum {
+  available   [note: "Ready for use"]
+  in_use      [note: "Currently being used"]
+  maintenance [note: "Under repair or scheduled maintenance"]
+  retired     [note: "Permanently removed from service"]
+}
+
+
+// ============================================================
+// 🟢 MVP: TABLE 1 — Memberships
+// ============================================================
+Table Memberships {
+  membership_id   int                  [pk, increment,  note: "Surrogate primary key — auto-generated, never exposed as business ID"]
+  member_id       int                  [not null,       note: "FK → Members: the member who owns this membership"]
+  membership_type membership_type_enum [not null,       note: "ENUM — enforces only valid plan types: monthly | yearly | premium"]
+  price           decimal(10,2)        [not null,       note: "Cost in local currency. CONSTRAINT: must be > 0"]
+  start_date      date                 [not null,       note: "Inclusive start date of the membership period"]
+  end_date        date                 [not null,       note: "Inclusive expiry date. CONSTRAINT: end_date > start_date"]
+  is_active       boolean              [not null,       note: "TRUE if this is the member's currently active membership. DEFAULT TRUE. Only one active membership per member"]
+  created_at      timestamp            [not null,       note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at      timestamp            [not null,       note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
+
+  indexes {
+    member_id                [name: "idx_memberships_member_id"]
+    (member_id, is_active)   [name: "idx_memberships_active_lookup", note: "Quickly find the active membership for a member"]
+    (member_id, end_date)    [name: "idx_memberships_history", note: "Optimizes membership history queries"]
+  }
+
+  note: '''
+  🟢 MVP — Tracks each member subscription plan and period.
+
+  Integrity checks:
+    - price > 0
+    - end_date > start_date
+    - membership_type restricted to enum values
+    - member_id is NOT NULL
+    - is_active is NOT NULL
+    - Only ONE membership per member should have is_active = TRUE
+      (enforced via application logic or unique partial index)
+
+  Design: Stored separately from Members to support membership
+  history — a member can have multiple memberships over time
+  (e.g., upgraded from monthly to yearly). The is_active flag
+  marks which one is currently active, avoiding the circular
+  dependency of the bidirectional reference pattern.
+  '''
+}
+
+
+// ============================================================
+// 🟢 MVP: TABLE 2 — Members
+// ============================================================
+Table Members {
+  member_id     int          [pk, increment,  note: "Surrogate primary key"]
+  first_name    varchar(50)  [not null,       note: "CONSTRAINT: non-empty string, max 50 chars"]
+  last_name     varchar(50)  [not null,       note: "CONSTRAINT: non-empty string, max 50 chars"]
+  email         varchar(100) [not null, unique, note: "Business identifier — must be unique and valid email format. Used for login and notifications"]
+  phone         varchar(20)  [                note: "Optional contact number. Stored as string to support international formats (+38050...). CONSTRAINT: CHECK (phone IS NULL OR phone ~ '^[+]?[0-9]{10,20}$')"]
+  date_of_birth date         [                note: "Optional. Used to calculate age for age-restricted classes"]
+  join_date     date         [not null,       note: "Set to CURRENT_DATE on insert. Marks when the member account was created"]
+  created_at    timestamp    [not null,       note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at    timestamp    [not null,       note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
+
+  indexes {
+    email [unique, name: "uq_members_email"]
+  }
+
+  note: '''
+  🟢 MVP — Core member profiles.
+
+  Integrity checks:
+    - email must be unique (enforced by index)
+    - first_name and last_name are NOT NULL
+    - join_date defaults to today
+
+  Design: To find a member's active membership, query the Memberships
+  table WHERE member_id = X AND is_active = TRUE. This single-direction
+  relationship is simpler than bidirectional and avoids circular insert
+  dependencies.
+  '''
+}
+
+Ref: Memberships.member_id > Members.member_id
+
+
+// ============================================================
+// 🟢 MVP: TABLE 3 — Trainers
+// ============================================================
+Table Trainers {
+  trainer_id  int          [pk, increment,    note: "Surrogate primary key"]
+  first_name  varchar(50)  [not null,         note: "CONSTRAINT: non-empty, max 50 chars"]
+  last_name   varchar(50)  [not null,         note: "CONSTRAINT: non-empty, max 50 chars"]
+  email       varchar(100) [not null, unique, note: "Unique business identifier — used for login and scheduling"]
+  phone       varchar(20)  [                  note: "Optional contact phone. CONSTRAINT: CHECK (phone IS NULL OR phone ~ '^[+]?[0-9]{10,20}$')"]
+  hire_date   date         [not null,         note: "Date the trainer was officially employed. Used for seniority calculations"]
+  is_active   boolean      [not null,         note: "TRUE if trainer is currently employed and available for classes/PT sessions. DEFAULT TRUE. Set to FALSE instead of deleting"]
+  bio         text         [                  note: "Optional. Free-text professional background displayed on trainer profile page"]
+  created_at  timestamp    [not null,         note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at  timestamp    [not null,         note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
+
+  indexes {
+    email     [unique, name: "uq_trainers_email"]
+    is_active [name: "idx_trainers_active", note: "Quickly filter active trainers for scheduling and assignment"]
+  }
+
+  note: '''
+  🟢 MVP — Trainer profiles used for class assignment and PT booking.
+
+  Integrity checks:
+    - email must be unique
+    - hire_date is NOT NULL
+    - is_active is NOT NULL (defaults to TRUE)
+
+  Design: Trainers are NEVER physically deleted — they are referenced
+  by historical class and session records. When a trainer leaves,
+  set is_active = FALSE. This preserves all historical data while
+  preventing the trainer from being assigned to new classes or sessions.
+  Active trainers can be quickly filtered using the is_active index.
+  '''
+}
+
+
+// ============================================================
+// 🟢 MVP: TABLE 4 — Classes
+// ============================================================
+Table Classes {
+  class_id     int              [pk, increment, note: "Surrogate primary key"]
+  class_name   varchar(100)     [not null,      note: "E.g. Yoga, Spinning, Strength Training. CONSTRAINT: non-empty"]
+  description  text             [               note: "Optional. Displayed on the schedule page to help members choose"]
+  trainer_id   int              [               note: "FK → Trainers: assigned trainer. NULL if unassigned. SET NULL on trainer delete to preserve class history"]
+  schedule_day day_of_week_enum [not null,      note: "ENUM — day of the week this class runs"]
+  start_time   time             [not null,      note: "Class start time. CONSTRAINT: start_time < end_time"]
+  end_time     time             [not null,      note: "Class end time. CONSTRAINT: end_time > start_time"]
+  capacity     int              [not null,      note: "Maximum participants allowed. DEFAULT 20. CONSTRAINT: capacity > 0"]
+  room         varchar(50)      [               note: "Optional room or zone label (e.g. Studio A, Main Floor)"]
+  created_at   timestamp        [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at   timestamp        [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
+
+  indexes {
+    trainer_id                 [name: "idx_classes_trainer_id"]
+    (schedule_day, start_time) [name: "idx_classes_schedule", note: "Optimizes daily schedule lookup queries"]
+  }
+
+  note: '''
+  🟢 MVP — Weekly recurring class definitions.
+
+  Integrity checks:
+    - end_time > start_time (CHECK constraint in SQL)
+    - capacity > 0
+    - schedule_day restricted to enum values
+    - trainer_id SET NULL on trainer delete
+
+  Design: Each row is a recurring weekly slot, not a single event.
+  Attendance records the specific date a member attended.
+  This avoids duplicating class rows for every weekly occurrence.
+  '''
+}
+
+Ref: Classes.trainer_id > Trainers.trainer_id
+
+
+// ============================================================
+// 🟢 MVP: TABLE 5 — Attendance
+// ============================================================
+Table Attendance {
+  attendance_id   int                    [pk, increment, note: "Surrogate primary key"]
+  member_id       int                    [               note: "FK → Members. NULL if member was deleted. SET NULL on member delete to preserve attendance history"]
+  class_id        int                    [not null,      note: "FK → Classes. CASCADE delete — remove attendance if class is deleted"]
+  attendance_date date                   [not null,      note: "The specific calendar date of the class session"]
+  status          attendance_status_enum [not null,      note: "ENUM — present | absent | cancelled. DEFAULT present"]
+  created_at      timestamp              [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at      timestamp              [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
+
+  indexes {
+    (member_id, class_id, attendance_date) [unique, name: "uq_attendance_no_duplicate",   note: "CORE INTEGRITY: prevents a member being logged twice for the same class on the same day"]
+    member_id                              [name: "idx_attendance_member_id",              note: "Speeds up all classes attended by member queries"]
+    class_id                               [name: "idx_attendance_class_id",               note: "Speeds up all members who attended class X queries"]
+    attendance_date                        [name: "idx_attendance_date",                   note: "Speeds up date-range attendance reports"]
+  }
+
+  note: '''
+  🟢 MVP — Records every class attendance event.
+
+  Integrity checks:
+    - UNIQUE (member_id, class_id, attendance_date) — no double entries
+    - status restricted to enum values
+    - class_id is NOT NULL
+
+  Design: status = cancelled means the member booked but cancelled
+  before the class. status = absent means they booked and did not
+  show up. This distinction helps identify chronic no-shows.
+
+  member_id is nullable: When a member account is deleted (e.g., data
+  cleanup, account closure), their attendance history is preserved
+  with member_id = NULL. This maintains historical class capacity
+  and attendance statistics without requiring the member profile to
+  remain in the system.
+  '''
+}
+
+Ref: Attendance.member_id > Members.member_id
+Ref: Attendance.class_id  > Classes.class_id
+
+
+// ============================================================
+// 🔵 FINAL VERSION: TABLE 6 — TrainerSpecializations
+// ============================================================
+Table TrainerSpecializations {
+  specialization_id int          [pk, increment, note: "Surrogate primary key"]
+  trainer_id        int          [not null,      note: "FK → Trainers. CASCADE delete — specializations removed with trainer"]
+  specialization    varchar(100) [not null,      note: "Area of expertise, e.g. Nutrition, CrossFit, Pilates, Rehabilitation. CONSTRAINT: non-empty"]
+  certified         boolean      [not null,      note: "TRUE if the trainer holds a formal certificate for this specialization. DEFAULT FALSE"]
+  cert_date         date         [               note: "Date the certificate was issued. NULL if not certified or date unknown"]
+  created_at        timestamp    [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at        timestamp    [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
+
+  indexes {
+    trainer_id                   [name: "idx_spec_trainer_id"]
+    (trainer_id, specialization) [unique, name: "uq_trainer_specialization", note: "Prevents adding the same specialization twice for one trainer"]
+  }
+
+  note: '''
+  🔵 Final — Trainer expertise and certification records.
+
+  Integrity checks:
+    - UNIQUE (trainer_id, specialization) — no duplicate entries per trainer
+    - certified is NOT NULL (explicit true/false, no ambiguity)
+    - cert_date should only be set when certified = TRUE
+
+  Design: One trainer can have multiple specializations (one-to-many).
+  Stored separately from Trainers to keep the trainer table clean
+  and allow unlimited specializations without EAV anti-patterns.
+  '''
+}
+
+Ref: TrainerSpecializations.trainer_id > Trainers.trainer_id
+
+
+// ============================================================
+// 🔵 FINAL VERSION: TABLE 7 — TrainerAvailability
+// ============================================================
+Table TrainerAvailability {
+  availability_id int              [pk, increment, note: "Surrogate primary key"]
+  trainer_id      int              [not null,      note: "FK → Trainers. CASCADE delete"]
+  day_of_week     day_of_week_enum [not null,      note: "ENUM — the weekday this availability window applies to"]
+  available_from  time             [not null,      note: "Start of the window. CONSTRAINT: available_from < available_until"]
+  available_until time             [not null,      note: "End of the window. CONSTRAINT: available_until > available_from"]
+  created_at      timestamp        [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at      timestamp        [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
+
+  indexes {
+    trainer_id                                [name: "idx_avail_trainer_id"]
+    (trainer_id, day_of_week, available_from) [unique, name: "uq_trainer_avail_slot", note: "Prevents duplicate or overlapping slots for same trainer on same day at same start time"]
+  }
+
+  note: '''
+  🔵 Final — Weekly recurring availability windows for PT booking.
+
+  Integrity checks:
+    - UNIQUE (trainer_id, day_of_week, available_from) — no duplicate slots
+    - available_until > available_from (CHECK constraint in SQL)
+    - day_of_week restricted to enum values
+
+  Design: Stored as recurring weekly slots, not specific dates.
+  When a PersonalTraining session is booked, the application
+  checks this table to confirm the trainer is available at the
+  requested time. A future enhancement could add date-specific
+  overrides (e.g., vacation days) via a TrainerBlacklist table.
+
+  Overlapping time windows prevention:
+    - The UNIQUE index on (trainer_id, day_of_week, available_from)
+      prevents exact duplicates but does NOT prevent overlaps like
+      09:00-11:00 and 10:30-12:00.
+    - Overlapping windows are validated at the APPLICATION LEVEL
+      before insert/update by checking existing windows for the same
+      trainer and day, ensuring no overlap occurs.
+    - Alternative: Use PostgreSQL exclusion constraints with ranges
+      (e.g., EXCLUDE USING gist (trainer_id WITH =, tsrange(...) WITH &&))
+  '''
+}
+
+Ref: TrainerAvailability.trainer_id > Trainers.trainer_id
+
+
+// ============================================================
+// 🔵 FINAL VERSION: TABLE 8 — PersonalTraining
+// ============================================================
+Table PersonalTraining {
+  session_id   int                 [pk, increment, note: "Surrogate primary key"]
+  member_id    int                 [               note: "FK → Members. NULL if member was deleted. SET NULL on member delete to preserve session history"]
+  trainer_id   int                 [               note: "FK → Trainers. NULL if trainer was deleted. SET NULL on trainer delete to preserve session history"]
+  session_date date                [not null,      note: "The specific calendar date of the session"]
+  start_time   time                [not null,      note: "Session start. CONSTRAINT: start_time < end_time"]
+  end_time     time                [not null,      note: "Session end. CONSTRAINT: end_time > start_time"]
+  status       session_status_enum [not null,      note: "ENUM — scheduled | completed | cancelled. DEFAULT scheduled"]
+  notes        text                [               note: "Optional post-session notes by trainer (exercises done, feedback)"]
+  price        decimal(10,2)       [               note: "Price for this session. CONSTRAINT: price >= 0 if set"]
+  created_at   timestamp           [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at   timestamp           [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
+
+  indexes {
+    member_id                              [name: "idx_pt_member_id"]
+    trainer_id                             [name: "idx_pt_trainer_id"]
+    (trainer_id, session_date, start_time) [unique, name: "uq_pt_trainer_no_overlap", note: "A trainer cannot have two sessions at the same date and start time. This is INTENTIONALLY a separate constraint from the member constraint below."]
+    (member_id, session_date, start_time)  [unique, name: "uq_pt_member_no_overlap",  note: "A member cannot book two sessions at the same date and start time. This is INTENTIONALLY a separate constraint from the trainer constraint above. Together they prevent both trainer and member double-booking."]
+  }
+
+  note: '''
+  🔵 Final — One-on-one personal training session bookings.
+
+  Integrity checks:
+    - end_time > start_time
+    - UNIQUE (trainer_id, session_date, start_time) — no trainer double-booking
+    - UNIQUE (member_id, session_date, start_time)  — no member scheduling conflict
+    - price >= 0 if provided
+    - status defaults to scheduled
+
+  Design: This table acts as a many-to-many bridge between Members
+  and Trainers with additional session metadata. It is NOT a pure
+  junction table because it carries meaningful data (date, time,
+  price, notes), justifying it as its own entity.
+
+  Both member_id and trainer_id are nullable: When a member or trainer
+  account is deleted, their session records are preserved with the
+  respective FK set to NULL. This protects historical booking, pricing,
+  and billing data without requiring deleted accounts to remain in the
+  system. Essential for financial auditing and business analytics.
+  '''
+}
+
+Ref: PersonalTraining.member_id  > Members.member_id
+Ref: PersonalTraining.trainer_id > Trainers.trainer_id
+
+
+// ============================================================
+// 🔵 FINAL VERSION: TABLE 9 — Equipment
+// ============================================================
+Table Equipment {
+  equipment_id    int                   [pk, increment, note: "Surrogate primary key"]
+  equipment_name  varchar(100)          [not null,      note: "Descriptive name, e.g. Treadmill, Barbell 20kg. CONSTRAINT: non-empty"]
+  category        varchar(50)           [               note: "Optional grouping: Cardio, Free Weights, Machines, Stretching"]
+  status          equipment_status_enum [not null,      note: "ENUM — available | in_use | maintenance | retired. DEFAULT available"]
+  purchase_date   date                  [               note: "When the item was acquired. Used for depreciation and warranty tracking"]
+  last_maintained date                  [               note: "Date of most recent maintenance. Used to trigger overdue alerts"]
+  quantity        int                   [not null,      note: "Number of identical units. CONSTRAINT: quantity >= 0"]
+  location        varchar(100)          [               note: "Physical location in the gym, e.g. Room A, Main Floor Zone 3"]
+  created_at      timestamp             [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at      timestamp             [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
+
+  indexes {
+    status   [name: "idx_equipment_status",   note: "Quickly filter all equipment needing maintenance"]
+    category [name: "idx_equipment_category", note: "Speeds up category-based inventory reports"]
+  }
+
+  note: '''
+  🔵 Final — Gym equipment inventory management.
+
+  Integrity checks:
+    - quantity >= 0 (retired items may have 0 but row kept for history)
+    - status restricted to enum values
+    - equipment_name is NOT NULL
+
+  Design: Equipment is standalone — not linked to members or
+  trainers in this version to keep scope clean. In a full system,
+  an EquipmentUsage table would track which member or class uses
+  which equipment and when.
+
+  The last_maintained field supports scheduled maintenance:
+  query all equipment where last_maintained < (today - 90 days).
+  '''
+}
+
+
+// ============================================================
+// 🔵 FINAL VERSION: TABLE 10 — Progress
+// ============================================================
+Table Progress {
+  progress_id    int          [pk, increment, note: "Surrogate primary key"]
+  member_id      int          [not null,      note: "FK → Members. CASCADE delete"]
+  recorded_date  date         [not null,      note: "The date these metrics were measured. Enables trend analysis over time"]
+  weight_kg      decimal(5,2) [               note: "Body weight in kilograms. CONSTRAINT: CHECK (weight_kg IS NULL OR weight_kg > 0)"]
+  body_fat_pct   decimal(5,2) [               note: "Body fat percentage. CONSTRAINT: CHECK (body_fat_pct IS NULL OR (body_fat_pct >= 0 AND body_fat_pct <= 100))"]
+  muscle_mass_kg decimal(5,2) [               note: "Estimated muscle mass in kg. CONSTRAINT: CHECK (muscle_mass_kg IS NULL OR muscle_mass_kg > 0)"]
+  notes          text         [               note: "Optional trainer or member observations for this check-in"]
+  created_at     timestamp    [not null,      note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at     timestamp    [not null,      note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
+
+  indexes {
+    member_id                  [name: "idx_progress_member_id"]
+    (member_id, recorded_date) [unique, name: "uq_progress_one_per_day", note: "One progress snapshot per member per day — prevents accidental duplicates"]
+  }
+
+  note: '''
+  🔵 Final — Periodic fitness metric snapshots per member.
+
+  Integrity checks:
+    - UNIQUE (member_id, recorded_date) — one record per member per day
+    - weight_kg > 0 if set
+    - body_fat_pct between 0 and 100 if set
+    - muscle_mass_kg > 0 if set
+
+  Design: Rows are APPENDED on each check-in, never overwritten.
+  This is essential for trend tracking — historical data is needed
+  to plot progress charts. Overwriting would destroy this history.
+
+  Progress is intentionally separate from Goals:
+    Progress = what was actually measured
+    Goals    = what the member is targeting
+  '''
+}
+
+Ref: Progress.member_id > Members.member_id
+
+
+// ============================================================
+// 🔵 FINAL VERSION: TABLE 11 — Goals
+// ============================================================
+Table Goals {
+  goal_id          int     [pk, increment, note: "Surrogate primary key"]
+  member_id        int     [not null,      note: "FK → Members. CASCADE delete"]
+  goal_description text    [not null,      note: "Free-text description of the target. CONSTRAINT: non-empty"]
+  target_date      date    [               note: "Optional deadline. NULL = open-ended goal"]
+  achieved         boolean [not null,      note: "TRUE when the member has met the goal. DEFAULT FALSE"]
+  achieved_date    date    [               note: "Date the goal was marked as achieved. Only set when achieved = TRUE. CONSTRAINT: CHECK ((achieved = TRUE AND achieved_date IS NOT NULL) OR (achieved = FALSE AND achieved_date IS NULL))"]
+  created_at       timestamp [not null,    note: "Timestamp when the record was created. DEFAULT CURRENT_TIMESTAMP"]
+  updated_at       timestamp [not null,    note: "Timestamp when the record was last updated. DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"]
+
+  indexes {
+    member_id             [name: "idx_goals_member_id"]
+    (member_id, achieved) [name: "idx_goals_active", note: "Quickly retrieve only active (unachieved) goals per member"]
+  }
+
+  note: '''
+  🔵 Final — Member fitness goal tracking.
+
+  Integrity checks:
+    - achieved is NOT NULL (no ambiguity — explicitly true or false)
+    - achieved_date should only be set when achieved = TRUE
+      (enforced via CHECK constraint)
+    - goal_description is NOT NULL
+
+  Design: Goals are separate from Progress because they represent
+  different concepts:
+    Goals    → INTENTION (what you want to reach)
+    Progress → MEASUREMENT (what you actually achieved so far)
+
+  This separation allows queries like: find all members whose
+  latest weight in Progress is <= their target weight in Goals,
+  without coupling the two tables together.
+  '''
+}
+
+Ref: Goals.member_id > Members.member_id
