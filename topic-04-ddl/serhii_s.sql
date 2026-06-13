@@ -243,7 +243,7 @@ CREATE INDEX idx_attendance_class_id ON attendance(class_id);
 CREATE INDEX idx_attendance_date ON attendance(attendance_date);
 
 COMMENT ON TABLE attendance IS 'Records every class attendance event with status tracking';
-COMMENT ON COLUMN attendance.member_id IS 'SET NULL on member delete to preserve attendance history';
+COMMENT ON COLUMN attendance.member_id IS 'SET NULL on member delete to preserve attendance history. NULL records indicate deleted members — use LEFT JOIN with members table and COALESCE(m.first_name, "Deleted Member") for reporting';
 COMMENT ON COLUMN attendance.status IS 'present = attended | absent = no-show | cancelled = cancelled in advance';
 
 
@@ -454,7 +454,7 @@ CREATE UNIQUE INDEX uq_progress_log_one_per_day
     ON progress_log(member_id, metric_id, measured_at);
 
 COMMENT ON TABLE progress_log IS 'Time-series fitness measurements — one row per member per metric per date';
-COMMENT ON COLUMN progress_log.value IS 'Numeric measurement value — unit defined in progress_metrics table';
+COMMENT ON COLUMN progress_log.value IS 'Numeric measurement value — unit defined in progress_metrics table. Precision: DECIMAL(10,2) supports 2 decimal places, suitable for most physical metrics (weight, body fat %, distances, etc.)';
 COMMENT ON COLUMN progress_log.measured_at IS 'Date of measurement — time component not needed for daily snapshots';
 COMMENT ON INDEX idx_progress_log_member_metric IS 'Optimizes queries for member progress charts and trend analysis';
 COMMENT ON INDEX uq_progress_log_one_per_day IS 'Prevents duplicate measurements — one value per metric per day';
@@ -493,4 +493,5 @@ CREATE INDEX idx_goals_active ON goals(member_id, achieved);
 
 COMMENT ON TABLE goals IS 'Member fitness goals — represents intention, not measurement';
 COMMENT ON COLUMN goals.achieved IS 'TRUE when member has met the goal';
-COMMENT ON COLUMN goals.achieved_date IS 'Date goal was achieved — enforced via CHECK constraint';
+COMMENT ON COLUMN goals.achieved_date IS 'Date goal was achieved — enforced via CHECK constraint. When marking goal as achieved, BOTH fields must be updated together: UPDATE goals SET achieved=TRUE, achieved_date=CURRENT_DATE WHERE goal_id=X';
+
