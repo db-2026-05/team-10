@@ -373,7 +373,7 @@ FROM goals;
 
 UPDATE personal_training
 SET status = 'completed',
-    updated_at = CURRENT_TIMESTAMP
+    updated_at = CURRENT_TIMESTAMP  -- Manual audit timestamp
 WHERE start_at < CURRENT_TIMESTAMP
   AND status = 'scheduled';
 
@@ -579,14 +579,40 @@ HAVING COUNT(*) > 1;
 -- Expected: 0 rows (constraint enforced by unique partial index)
 
 -- Check: All personal training sessions within trainer availability
--- (Simplified check - production would validate against day_of_week and time ranges)
-SELECT pt.session_id, pt.trainer_id, pt.start_at
+-- Validates that PT sessions occur during trainer's available time windows
+-- Checks: day of week, start time, and session end time
+SELECT 
+    pt.session_id,
+    pt.trainer_id,
+    pt.start_at,
+    TO_CHAR(pt.start_at, 'Dy') AS session_day,
+    pt.start_at::TIME AS session_start_time,
+    (pt.start_at + (pt.duration_minutes || ' minutes')::INTERVAL)::TIME AS session_end_time,
+    'No matching availability' AS issue
 FROM personal_training pt
-WHERE NOT EXISTS (
-    SELECT 1 FROM trainer_availability ta
+WHERE pt.status = 'scheduled'
+  AND NOT EXISTS (
+    SELECT 1 
+    FROM trainer_availability ta
     WHERE ta.trainer_id = pt.trainer_id
+      -- Match day of week (Mon=1, Tue=2, ... Sun=0)
+      AND ta.day_of_week = CASE EXTRACT(DOW FROM pt.start_at)::INTEGER
+          WHEN 0 THEN 'Sun'
+          WHEN 1 THEN 'Mon'
+          WHEN 2 THEN 'Tue'
+          WHEN 3 THEN 'Wed'
+          WHEN 4 THEN 'Thu'
+          WHEN 5 THEN 'Fri'
+          WHEN 6 THEN 'Sat'
+      END
+      -- Session starts within or after availability window
+      AND pt.start_at::TIME >= ta.available_from
+      -- Session ends before availability window closes
+      AND (pt.start_at + (pt.duration_minutes || ' minutes')::INTERVAL)::TIME <= ta.available_until
 );
--- Expected: Varies based on data
+-- Expected: 0 rows if all sessions are properly scheduled
+-- Note: This check validates business rule that PT sessions must occur
+-- during trainer's declared availability windows
 
 -- Check: Goal achievement dates are consistent
 SELECT goal_id, achieved, achieved_date
