@@ -1,0 +1,126 @@
+// 1. MembershipType
+Table MembershipType {
+  id             int          [pk, increment]
+  name           varchar      [not null, note: 'Monthly, Yearly, Premium']
+  price          decimal      [not null]
+  duration_days  int          [not null]
+}
+
+// 2. MEMBERS
+Table Members {
+  id          int       [pk, increment]
+  full_name   varchar   [not null]
+  email       varchar   [unique, not null]
+  join_date   datetime  [not null, default: `now()`]
+}
+
+// 3. MEMBERSHIPS (history)
+Table Memberships {
+  id                 int       [pk, increment]
+  member_id          int       [ref: > Members.id, not null]
+  membership_type_id int       [ref: > MembershipType.id, not null]
+  start_date         datetime  [not null]
+  end_date           datetime  [not null]
+  status             varchar   [not null, note: 'active, expired, cancelled']
+}
+
+// 4. TRAINERS
+Table Trainers {
+  id                int     [pk, increment]
+  full_name         varchar [not null]
+  experience_years  int
+  bio               text
+}
+
+// 5. SPECIALIZATIONS
+Table Specializations {
+  id    int     [pk, increment]
+  name  varchar [not null, note: 'Yoga, Boxing, Crossfit, Spinning...']
+}
+
+// 6. TRAINER SPECIALIZATIONS (M2M)
+Table TrainerSpecializations {
+  trainer_id  int  [ref: > Trainers.id, not null]
+  spec_id     int  [ref: > Specializations.id, not null]
+
+  indexes {
+    (trainer_id, spec_id) [pk]
+  }
+}
+
+// 7. CLASSES
+Table Classes {
+  id           int     [pk, increment]
+  title        varchar [not null, note: 'Morning Yoga, Evening Spinning...']
+  description  text
+}
+
+// 8. CLASS SCHEDULE
+Table ClassSchedule {
+  id          int       [pk, increment]
+  class_id    int       [ref: > Classes.id, not null]
+  trainer_id  int       [ref: > Trainers.id, not null]
+  start_time  datetime  [not null]
+  room_number int
+  capacity    int       [not null]
+}
+
+// 9. ATTENDANCE (M2M)
+Table Attendance {
+  id           int       [pk, increment]
+  member_id    int       [ref: > Members.id, not null]
+  schedule_id  int       [ref: > ClassSchedule.id, not null]
+  check_in_time datetime [not null, default: `now()`]
+
+  indexes {
+    (member_id, schedule_id) [unique]
+  }
+}
+
+// 10. PERSONAL TRAINING SESSIONS
+Table PersonalTraining {
+  id               int       [pk, increment]
+  member_id        int       [ref: > Members.id, not null]
+  trainer_id       int       [ref: > Trainers.id, not null]
+  session_date     datetime  [not null]
+  duration_minutes int       [default: 60]
+  status           varchar   [not null, note: 'booked, completed, cancelled']
+  notes            text
+}
+
+// 11. EQUIPMENT
+Table Equipment {
+  id            int      [pk, increment]
+  name          varchar  [not null]
+  quantity      int      [not null, default: 1]
+  status        varchar  [not null, note: 'working, in_repair, decommissioned']
+  last_checked  datetime
+}
+
+// 12. MEMBER PROGRESS
+Table Progress {
+  id            int       [pk, increment]
+  member_id     int       [ref: > Members.id, not null]
+  recorded_at   datetime  [not null, default: `now()`]
+  weight_kg     decimal
+  body_fat_pct  decimal
+  metric_name   varchar   [note: 'e.g. bench_press_kg, run_5km_min']
+  metric_value  decimal
+}
+
+// 13. FITNESS GOALS
+Table FitnessGoals {
+  id            int       [pk, increment]
+  member_id     int       [ref: > Members.id, not null]
+  goal_type     varchar   [not null, note: 'weight_loss, strength, endurance...']
+  target_value  decimal
+  target_date   datetime
+  achieved_at   datetime  [note: 'null = not yet achieved']
+}
+// 14.EQUIPMENT SPECIALIZATION
+Table EquipmentSpecialization
+{
+  equipment_id int [ref : > Equipment.id]
+  spec_id int [ref:> Specializations.id]
+
+}
